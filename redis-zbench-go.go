@@ -19,6 +19,7 @@ import (
 var totalCommands uint64
 var totalErrors uint64
 var latencies *hdrhistogram.Histogram
+var replySizes []uint64
 
 const Inf = rate.Limit(math.MaxFloat64)
 const charset = "abcdefghijklmnopqrstuvwxyz"
@@ -42,6 +43,7 @@ func main() {
 	keyspacelen := flag.Uint64("r", 1000000, "keyspace length.")
 	numberRequests := flag.Uint64("n", 10000000, "Total number of requests. Only used in case of -mode=query")
 	debug := flag.Int("debug", 0, "Client debug level.")
+	multi := flag.Bool("multi", false, "Run each command in multi-exec.")
 	benchMode := flag.String("mode", "", "Bechmark mode. One of [load,query]. `load` will populate the db with sorted sets. `query` will run the zrangebylexscore command .")
 	perKeyElmRangeStart := flag.Uint64("key-elements-min", 1, "Use zipfian random-sized items in the specified range (min-max).")
 	perKeyElmRangeEnd := flag.Uint64("key-elements-max", 10, "Use zipfian random-sized items in the specified range (min-max).")
@@ -60,7 +62,7 @@ func main() {
 	useRateLimiter := false
 	if *rps != 0 {
 		requestRate = rate.Limit(*rps)
-		requestBurst = int(*clients)
+		requestBurst = int(*clients) * int(*pipeline)
 		useRateLimiter = true
 	}
 
@@ -73,6 +75,7 @@ func main() {
 	client_update_tick := 1
 	latencies = hdrhistogram.New(1, 90000000, 3)
 	opts := make([]radix.DialOpt, 0)
+	replySizes = make([]uint64, *perKeyElmRangeEnd)
 	if *password != "" {
 		opts = append(opts, radix.DialAuthPass(*password))
 	}
@@ -83,7 +86,7 @@ func main() {
 	fmt.Printf("Total clients: %d. Commands per client: %d Total commands: %d\n", *clients, samplesPerClient, totalCmds)
 	fmt.Printf("Using random seed: %d\n", *seed)
 	rand.Seed(*seed)
-	var standalone *radix.Pool = getStandaloneConn(connectionStr, opts, *clients)
+	var connectionPool *radix.Pool = getStandaloneConn(connectionStr, opts, *clients)
 	for client_id := 1; uint64(client_id) <= *clients; client_id++ {
 		wg.Add(1)
 		keyspace_client_start := uint64(client_id-1) * samplesPerClient
@@ -91,7 +94,11 @@ func main() {
 		if uint64(client_id) == *clients {
 			keyspace_client_end = uint64(*keyspacelen)
 		}
-		go loadGoRoutime(standalone, keyspace_client_start, keyspace_client_end, samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+		if isLoad {
+			go loadGoRoutime(connectionPool, keyspace_client_start, keyspace_client_end, samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+		} else {
+			go queryGoRoutime(connectionPool, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+		}
 	}
 
 	// listen for C-c
@@ -108,11 +115,22 @@ func main() {
 	fmt.Printf("\n")
 	fmt.Printf("#################################################\n")
 	fmt.Printf("Total Duration %.3f Seconds\n", duration.Seconds())
+	fmt.Printf("Total Issued commands %d\n", totalMessages)
 	fmt.Printf("Total Errors %d\n", totalErrors)
 	fmt.Printf("Throughput summary: %.0f requests per second\n", messageRate)
 	fmt.Printf("Latency summary (msec):\n")
 	fmt.Printf("    %9s %9s %9s\n", "p50", "p95", "p99")
 	fmt.Printf("    %9.3f %9.3f %9.3f\n", p50IngestionMs, p95IngestionMs, p99IngestionMs)
+	fmt.Printf("#################################################\n")
+	fmt.Printf("Printing reply histogram\n")
+	var total_replies uint64 = 0
+	for reply_size, count := range replySizes {
+		percent := float32(count) / float32(totalMessages) * 100.0
+		fmt.Printf("Size: %d\tCount: %d. (%% %.2f)\n", reply_size, count, percent)
+		total_replies += count
+	}
+	fmt.Printf("--------------------------------------------------\n")
+	fmt.Printf("Total processed replies %d\n", total_replies)
 
 	if closed {
 		return
@@ -122,6 +140,51 @@ func main() {
 	close(stopChan)
 	// and wait for them both to reply back
 	wg.Wait()
+}
+
+func queryGoRoutime(conn radix.Client, multi bool, keyspace_len uint64, samplesPerClient uint64, pipeline uint64, perKeyElmDataSize uint64, perKeyElmRangeStart uint64, perKeyElmRangeEnd uint64, debug int, w *sync.WaitGroup, useRateLimiter bool, rateLimiter *rate.Limiter) {
+	defer w.Done()
+	var i uint64 = 0
+	var multiIncr uint64 = 0
+	var multiPad uint64 = 0
+	if multi {
+		multiIncr += 2
+		multiPad += 1
+	}
+	cmds := make([]radix.CmdAction, pipeline+multiIncr)
+	cmdReplies := make([][]string, pipeline)
+	for i < samplesPerClient {
+		if useRateLimiter {
+			r := rateLimiter.ReserveN(time.Now(), int(pipeline))
+			time.Sleep(r.Delay())
+		}
+		var j uint64 = 0
+		if multi {
+			cmds[0] = radix.Cmd(nil, "MULTI")
+			cmds[pipeline+multiPad] = radix.Cmd(&cmdReplies, "EXEC")
+		}
+		for ; j < pipeline; j++ {
+			cmdArgs := []string{fmt.Sprintf("zbench:%d", rand.Int63n(int64(keyspace_len))), fmt.Sprintf("[%c", charset[rand.Intn(len(charset))]), "-"}
+			cmds[j+multiPad] = radix.Cmd(nil, "ZREVRANGEBYLEX", cmdArgs...)
+		}
+		var err error
+		startT := time.Now()
+		err = conn.Do(radix.Pipeline(cmds...))
+		endT := time.Now()
+		if err != nil {
+			log.Fatalf("Received an error with the following command(s): %v, error: %v", cmds, err)
+		}
+		duration := endT.Sub(startT)
+		err = latencies.RecordValue(duration.Microseconds())
+		if err != nil {
+			log.Fatalf("Received an error while recording latencies: %v", err)
+		}
+		for _, reply := range cmdReplies {
+			atomic.AddUint64(&replySizes[len(reply)], 1)
+		}
+		atomic.AddUint64(&totalCommands, uint64(pipeline))
+		i = i + pipeline
+	}
 }
 
 func loadGoRoutime(conn radix.Client, keyspace_client_start uint64, keyspace_client_end uint64, samplesPerClient uint64, pipeline uint64, perKeyElmDataSize uint64, perKeyElmRangeStart uint64, perKeyElmRangeEnd uint64, debug int, w *sync.WaitGroup, useRateLimiter bool, rateLimiter *rate.Limiter) {
