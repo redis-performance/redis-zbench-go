@@ -1,6 +1,7 @@
 # Go parameters
 GOCMD=GO111MODULE=on go
 GOBUILD=$(GOCMD) build
+GOBUILDRACE=$(GOCMD) build -race
 GOINSTALL=$(GOCMD) install
 GOCLEAN=$(GOCMD) clean
 GOTEST=$(GOCMD) test
@@ -16,6 +17,9 @@ all: test coverage build
 
 build:
 	$(GOBUILD) .
+
+build-race:
+	$(GOBUILDRACE) .
 
 checkfmt:
 	@echo 'Checking gofmt';\
