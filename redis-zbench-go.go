@@ -51,12 +51,12 @@ func main() {
 	pipeline := flag.Uint64("pipeline", 1, "Redis pipeline value.")
 	version := flag.Bool("v", false, "Output version and exit")
 	flag.Parse()
+	git_sha := toolGitSHA1()
+	git_dirty_str := ""
+	if toolGitDirty() {
+		git_dirty_str = "-dirty"
+	}
 	if *version {
-		git_sha := toolGitSHA1()
-		git_dirty_str := ""
-		if toolGitDirty() {
-			git_dirty_str = "-dirty"
-		}
 		fmt.Fprintf(os.Stdout, "redis-zbench-go (git_sha1:%s%s)\n", git_sha, git_dirty_str)
 		os.Exit(0)
 	}
@@ -93,6 +93,7 @@ func main() {
 	stopChan := make(chan struct{})
 	// a WaitGroup for the goroutines to tell us they've stopped
 	wg := sync.WaitGroup{}
+	fmt.Printf("Using redis-zbench-go (git_sha1:%s%s)\n", git_sha, git_dirty_str)
 	fmt.Printf("Total clients: %d. Commands per client: %d Total commands: %d\n", *clients, samplesPerClient, totalCmds)
 	fmt.Printf("Using random seed: %d\n", *seed)
 	rand.Seed(*seed)
