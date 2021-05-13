@@ -49,7 +49,17 @@ func main() {
 	perKeyElmRangeEnd := flag.Uint64("key-elements-max", 10, "Use zipfian random-sized items in the specified range (min-max).")
 	perKeyElmDataSize := flag.Uint64("d", 10, "Data size of each sorted set element.")
 	pipeline := flag.Uint64("pipeline", 1, "Redis pipeline value.")
+	version := flag.Bool("v", false, "Output version and exit")
 	flag.Parse()
+	git_sha := toolGitSHA1()
+	git_dirty_str := ""
+	if toolGitDirty() {
+		git_dirty_str = "-dirty"
+	}
+	if *version {
+		fmt.Fprintf(os.Stdout, "redis-zbench-go (git_sha1:%s%s)\n", git_sha, git_dirty_str)
+		os.Exit(0)
+	}
 	if *benchMode != "load" && *benchMode != "query" {
 		log.Fatal("Please specify a valid -mode option. Either `load` or `query`")
 	}
@@ -83,6 +93,7 @@ func main() {
 	stopChan := make(chan struct{})
 	// a WaitGroup for the goroutines to tell us they've stopped
 	wg := sync.WaitGroup{}
+	fmt.Printf("Using redis-zbench-go (git_sha1:%s%s)\n", git_sha, git_dirty_str)
 	fmt.Printf("Total clients: %d. Commands per client: %d Total commands: %d\n", *clients, samplesPerClient, totalCmds)
 	fmt.Printf("Using random seed: %d\n", *seed)
 	rand.Seed(*seed)
@@ -121,16 +132,18 @@ func main() {
 	fmt.Printf("Latency summary (msec):\n")
 	fmt.Printf("    %9s %9s %9s\n", "p50", "p95", "p99")
 	fmt.Printf("    %9.3f %9.3f %9.3f\n", p50IngestionMs, p95IngestionMs, p99IngestionMs)
-	fmt.Printf("#################################################\n")
-	fmt.Printf("Printing reply histogram\n")
-	var total_replies uint64 = 0
-	for reply_size, count := range replySizes {
-		percent := float32(count) / float32(totalMessages) * 100.0
-		fmt.Printf("Size: %d\tCount: %d. (%% %.2f)\n", reply_size, count, percent)
-		total_replies += count
+	if !isLoad {
+		fmt.Printf("#################################################\n")
+		fmt.Printf("Printing reply histogram\n")
+		var total_replies uint64 = 0
+		for reply_size, count := range replySizes {
+			percent := float32(count) / float32(totalMessages) * 100.0
+			fmt.Printf("Size: %d\tCount: %d. (%% %.2f)\n", reply_size, count, percent)
+			total_replies += count
+		}
+		fmt.Printf("--------------------------------------------------\n")
+		fmt.Printf("Total processed replies %d\n", total_replies)
 	}
-	fmt.Printf("--------------------------------------------------\n")
-	fmt.Printf("Total processed replies %d\n", total_replies)
 
 	if closed {
 		return
@@ -154,6 +167,8 @@ func queryGoRoutime(conn radix.Client, multi bool, keyspace_len uint64, samplesP
 	cmds := make([]radix.CmdAction, pipeline+multiIncr)
 	cmdReplies := make([][]string, pipeline)
 	for i < samplesPerClient {
+		key_n := rand.Int63n(int64(keyspace_len))
+
 		if useRateLimiter {
 			r := rateLimiter.ReserveN(time.Now(), int(pipeline))
 			time.Sleep(r.Delay())
@@ -163,9 +178,15 @@ func queryGoRoutime(conn radix.Client, multi bool, keyspace_len uint64, samplesP
 			cmds[0] = radix.Cmd(nil, "MULTI")
 			cmds[pipeline+multiPad] = radix.Cmd(&cmdReplies, "EXEC")
 		}
-		for ; j < pipeline; j++ {
-			cmdArgs := []string{fmt.Sprintf("zbench:%d", rand.Int63n(int64(keyspace_len))), fmt.Sprintf("[%c", charset[rand.Intn(len(charset))]), "-"}
+		for j < pipeline {
+			keyname := getBenchKeyName(uint64(key_n))
+			cmdArgs := []string{keyname, fmt.Sprintf("[%c", charset[rand.Intn(len(charset))]), "-"}
 			cmds[j+multiPad] = radix.Cmd(nil, "ZREVRANGEBYLEX", cmdArgs...)
+			j = j + 1
+			key_n = key_n + crc16_num_slots
+			if uint64(key_n) > keyspace_len {
+				key_n = key_n % crc16_num_slots
+			}
 		}
 		var err error
 		startT := time.Now()
@@ -199,7 +220,8 @@ func loadGoRoutime(conn radix.Client, keyspace_client_start uint64, keyspace_cli
 		}
 		var j uint64 = 0
 		for ; j < pipeline; j++ {
-			cmdArgs := []string{fmt.Sprintf("zbench:%d", keypos)}
+			keyname := getBenchKeyName(keypos)
+			cmdArgs := []string{keyname}
 			nElements := rand.Int63n(int64(perKeyElmRangeEnd-perKeyElmRangeStart)) + int64(perKeyElmRangeStart)
 			var k int64 = 0
 			for ; k < nElements; k++ {
@@ -223,6 +245,11 @@ func loadGoRoutime(conn radix.Client, keyspace_client_start uint64, keyspace_cli
 		atomic.AddUint64(&totalCommands, uint64(pipeline))
 		i = i + pipeline
 	}
+}
+
+func getBenchKeyName(keypos uint64) string {
+	keyname := fmt.Sprintf("zbench:{%s}:%d", crc16_slot_table[keypos%crc16_num_slots], keypos)
+	return keyname
 }
 
 func updateCLI(tick *time.Ticker, c chan os.Signal, message_limit uint64) (bool, time.Time, time.Duration, uint64, []float64) {

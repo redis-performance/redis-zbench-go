@@ -15,11 +15,20 @@ DIST_OS_ARCHS = "linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64
 .PHONY: all test coverage
 all: test coverage build
 
+# Build-time GIT variables
+ifeq ($(GIT_SHA),)
+GIT_SHA:=$(shell git rev-parse HEAD)
+endif
+
+ifeq ($(GIT_DIRTY),)
+GIT_DIRTY:=$(shell git diff --no-ext-diff 2> /dev/null | wc -l)
+endif
+
 build:
-	$(GOBUILD) .
+	$(GOBUILD) -ldflags="-X 'main.GitSHA1=$(GIT_SHA)' -X 'main.GitDirty=$(GIT_DIRTY)'" .
 
 build-race:
-	$(GOBUILDRACE) .
+	$(GOBUILDRACE) -ldflags="-X 'main.GitSHA1=$(GIT_SHA)' -X 'main.GitDirty=$(GIT_DIRTY)'" .
 
 checkfmt:
 	@echo 'Checking gofmt';\
@@ -48,7 +57,9 @@ coverage: get test
 release:
 	$(GOGET) github.com/mitchellh/gox
 	$(GOGET) github.com/tcnksm/ghr
-	GO111MODULE=on gox  -osarch ${DIST_OS_ARCHS} -output "${DISTDIR}/${BIN_NAME}_{{.OS}}_{{.Arch}}" .
+	GO111MODULE=on gox  -osarch ${DIST_OS_ARCHS} \
+	    -output "${DISTDIR}/${BIN_NAME}_{{.OS}}_{{.Arch}}" \
+	    -ldflags="-X 'main.GitSHA1=$(GIT_SHA)' -X 'main.GitDirty=$(GIT_DIRTY)'" .
 
 publish: release
 	@for f in $(shell ls ${DISTDIR}); \
