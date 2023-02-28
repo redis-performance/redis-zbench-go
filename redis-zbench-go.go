@@ -17,6 +17,7 @@ import (
 )
 
 var totalCommands uint64
+var totalAddedElements uint64
 var totalErrors uint64
 var latencies *hdrhistogram.Histogram
 var replySizes []uint64
@@ -41,15 +42,20 @@ func main() {
 	seed := flag.Int64("random-seed", 12345, "random seed to be used.")
 	clients := flag.Uint64("c", 50, "number of clients.")
 	keyspacelen := flag.Uint64("r", 1000000, "keyspace length.")
+	keyspacestart := flag.Uint64("r-start", 0, "keyspace start.")
 	numberRequests := flag.Uint64("n", 10000000, "Total number of requests. Only used in case of -mode=query")
 	debug := flag.Int("debug", 0, "Client debug level.")
 	multi := flag.Bool("multi", false, "Run each command in multi-exec.")
 	benchMode := flag.String("mode", "", "Bechmark mode. One of [load,query]. `load` will populate the db with sorted sets. `query` will run the zrangebylexscore command .")
-	perKeyElmRangeStart := flag.Uint64("key-elements-min", 1, "Use zipfian random-sized items in the specified range (min-max).")
-	perKeyElmRangeEnd := flag.Uint64("key-elements-max", 10, "Use zipfian random-sized items in the specified range (min-max).")
+	perKeyElmRangeStart := flag.Uint64("key-elements-min", 10, "Use zipfian random-sized items in the specified range (min-max).")
+	perKeyElmRangeEnd := flag.Uint64("key-elements-max", 100, "Use zipfian random-sized items in the specified range (min-max).")
 	perKeyElmDataSize := flag.Uint64("d", 10, "Data size of each sorted set element.")
 	pipeline := flag.Uint64("pipeline", 1, "Redis pipeline value.")
 	version := flag.Bool("v", false, "Output version and exit")
+	printReplyHistogram := flag.Bool("print-histogram", false, "Print reply histogram")
+	clusterMode := flag.Bool("oss-cluster", false, "Enable OSS cluster mode.")
+	query := flag.String("query", "zrangebyscore", "Query type.")
+
 	flag.Parse()
 	git_sha := toolGitSHA1()
 	git_dirty_str := ""
@@ -85,7 +91,7 @@ func main() {
 	client_update_tick := 1
 	latencies = hdrhistogram.New(1, 90000000, 3)
 	opts := make([]radix.DialOpt, 0)
-	replySizes = make([]uint64, *perKeyElmRangeEnd)
+	replySizes = make([]uint64, *perKeyElmRangeEnd*100)
 	if *password != "" {
 		opts = append(opts, radix.DialAuthPass(*password))
 	}
@@ -93,22 +99,54 @@ func main() {
 	stopChan := make(chan struct{})
 	// a WaitGroup for the goroutines to tell us they've stopped
 	wg := sync.WaitGroup{}
+	keyspaceend := uint64(*keyspacestart) + uint64(*keyspacelen)
 	fmt.Printf("Using redis-zbench-go (git_sha1:%s%s)\n", git_sha, git_dirty_str)
 	fmt.Printf("Total clients: %d. Commands per client: %d Total commands: %d\n", *clients, samplesPerClient, totalCmds)
 	fmt.Printf("Using random seed: %d\n", *seed)
+	if isLoad {
+		fmt.Printf("Each ZSET contains between %d and %d elements.\n", *perKeyElmRangeStart, *perKeyElmRangeEnd)
+		fmt.Printf("Keyspace range: %d keys. [%d ; %d]\n", *keyspacelen, uint64(*keyspacestart), keyspaceend)
+	}
+	var cluster *radix.Cluster
+	if *clusterMode {
+		cluster = getOSSClusterConn(connectionStr, opts, *clients)
+	}
 	rand.Seed(*seed)
 	var connectionPool *radix.Pool = getStandaloneConn(connectionStr, opts, *clients)
 	for client_id := 1; uint64(client_id) <= *clients; client_id++ {
 		wg.Add(1)
-		keyspace_client_start := uint64(client_id-1) * samplesPerClient
-		keyspace_client_end := uint64(client_id) * samplesPerClient
+		keyspace_client_start := uint64(*keyspacestart) + (uint64(client_id-1) * samplesPerClient)
+		keyspace_client_end := uint64(*keyspacestart) + (uint64(client_id) * samplesPerClient)
 		if uint64(client_id) == *clients {
-			keyspace_client_end = uint64(*keyspacelen)
+			keyspace_client_end = keyspaceend
 		}
 		if isLoad {
-			go loadGoRoutime(connectionPool, keyspace_client_start, keyspace_client_end, samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+			if *clusterMode {
+				go loadGoRoutime(cluster, keyspace_client_start, keyspace_client_end, samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+			} else {
+				go loadGoRoutime(connectionPool, keyspace_client_start, keyspace_client_end, samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+			}
 		} else {
-			go queryGoRoutime(connectionPool, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+			switch *query {
+			case "zrange-byscore-rev":
+				if *clusterMode {
+					go queryGoRoutimeZrevrangeByScore(cluster, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+				} else {
+					go queryGoRoutimeZrevrangeByScore(connectionPool, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+				}
+			case "zrange-byscore":
+				if *clusterMode {
+					go queryGoRoutimeZrangeByScore(cluster, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+				} else {
+					go queryGoRoutimeZrangeByScore(connectionPool, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+				}
+			case "zrevrangebylex":
+				if *clusterMode {
+					go queryGoRoutimeZrangeByLex(cluster, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+				} else {
+					go queryGoRoutimeZrangeByLex(connectionPool, *multi, uint64(*keyspacelen), samplesPerClient, *pipeline, *perKeyElmDataSize, *perKeyElmRangeStart, *perKeyElmRangeEnd, int(*debug), &wg, useRateLimiter, rateLimiter)
+				}
+			}
 		}
 	}
 
@@ -129,16 +167,22 @@ func main() {
 	fmt.Printf("Total Issued commands %d\n", totalMessages)
 	fmt.Printf("Total Errors %d\n", totalErrors)
 	fmt.Printf("Throughput summary: %.0f requests per second\n", messageRate)
+	if isLoad {
+		avgZcard := float64(totalAddedElements) / float64(totalCommands)
+		fmt.Printf("Average zcard %.0f elements\n", avgZcard)
+	}
 	fmt.Printf("Latency summary (msec):\n")
 	fmt.Printf("    %9s %9s %9s\n", "p50", "p95", "p99")
 	fmt.Printf("    %9.3f %9.3f %9.3f\n", p50IngestionMs, p95IngestionMs, p99IngestionMs)
-	if !isLoad {
+	if !isLoad && *printReplyHistogram {
 		fmt.Printf("#################################################\n")
 		fmt.Printf("Printing reply histogram\n")
 		var total_replies uint64 = 0
 		for reply_size, count := range replySizes {
-			percent := float32(count) / float32(totalMessages) * 100.0
-			fmt.Printf("Size: %d\tCount: %d. (%% %.2f)\n", reply_size, count, percent)
+			if count > 0 {
+				percent := float32(count) / float32(totalMessages) * 100.0
+				fmt.Printf("Size: %d\tCount: %d. (%% %.2f)\n", reply_size, count, percent)
+			}
 			total_replies += count
 		}
 		fmt.Printf("--------------------------------------------------\n")
@@ -155,7 +199,7 @@ func main() {
 	wg.Wait()
 }
 
-func queryGoRoutime(conn radix.Client, multi bool, keyspace_len uint64, samplesPerClient uint64, pipeline uint64, perKeyElmDataSize uint64, perKeyElmRangeStart uint64, perKeyElmRangeEnd uint64, debug int, w *sync.WaitGroup, useRateLimiter bool, rateLimiter *rate.Limiter) {
+func queryGoRoutimeZrangeByLex(conn radix.Client, multi bool, keyspace_len uint64, samplesPerClient uint64, pipeline uint64, perKeyElmDataSize uint64, perKeyElmRangeStart uint64, perKeyElmRangeEnd uint64, debug int, w *sync.WaitGroup, useRateLimiter bool, rateLimiter *rate.Limiter) {
 	defer w.Done()
 	var i uint64 = 0
 	var multiIncr uint64 = 0
@@ -208,6 +252,112 @@ func queryGoRoutime(conn radix.Client, multi bool, keyspace_len uint64, samplesP
 	}
 }
 
+func queryGoRoutimeZrangeByScore(conn radix.Client, multi bool, keyspace_len uint64, samplesPerClient uint64, pipeline uint64, perKeyElmDataSize uint64, perKeyElmRangeStart uint64, perKeyElmRangeEnd uint64, debug int, w *sync.WaitGroup, useRateLimiter bool, rateLimiter *rate.Limiter) {
+	defer w.Done()
+	var i uint64 = 0
+	var multiIncr uint64 = 0
+	var multiPad uint64 = 0
+	if multi {
+		multiIncr += 2
+		multiPad += 1
+	}
+	cmds := make([]radix.CmdAction, pipeline+multiIncr)
+	cmdReplies := make([][]string, pipeline)
+	for i < samplesPerClient {
+		key_n := rand.Int63n(int64(keyspace_len))
+
+		if useRateLimiter {
+			r := rateLimiter.ReserveN(time.Now(), int(pipeline))
+			time.Sleep(r.Delay())
+		}
+		var j uint64 = 0
+		if multi {
+			cmds[0] = radix.Cmd(nil, "MULTI")
+			cmds[pipeline+multiPad] = radix.Cmd(&cmdReplies, "EXEC")
+		}
+		for j < pipeline {
+			keyname := getBenchKeyName(uint64(key_n))
+			cmdArgs := []string{keyname, "0", "1", "BYSCORE"}
+			cmds[j+multiPad] = radix.Cmd(&cmdReplies[j], "ZRANGE", cmdArgs...)
+			j = j + 1
+			key_n = key_n + crc16_num_slots
+			if uint64(key_n) > keyspace_len {
+				key_n = key_n % crc16_num_slots
+			}
+		}
+		var err error
+		startT := time.Now()
+		err = conn.Do(radix.Pipeline(cmds...))
+		endT := time.Now()
+		if err != nil {
+			log.Fatalf("Received an error with the following command(s): %v, error: %v", cmds, err)
+		}
+		duration := endT.Sub(startT)
+		err = latencies.RecordValue(duration.Microseconds())
+		if err != nil {
+			log.Fatalf("Received an error while recording latencies: %v", err)
+		}
+		for _, reply := range cmdReplies {
+			atomic.AddUint64(&replySizes[len(reply)/2], 1)
+		}
+		atomic.AddUint64(&totalCommands, uint64(pipeline))
+		i = i + pipeline
+	}
+}
+
+func queryGoRoutimeZrevrangeByScore(conn radix.Client, multi bool, keyspace_len uint64, samplesPerClient uint64, pipeline uint64, perKeyElmDataSize uint64, perKeyElmRangeStart uint64, perKeyElmRangeEnd uint64, debug int, w *sync.WaitGroup, useRateLimiter bool, rateLimiter *rate.Limiter) {
+	defer w.Done()
+	var i uint64 = 0
+	var multiIncr uint64 = 0
+	var multiPad uint64 = 0
+	if multi {
+		multiIncr += 2
+		multiPad += 1
+	}
+	cmds := make([]radix.CmdAction, pipeline+multiIncr)
+	cmdReplies := make([][]string, pipeline)
+	for i < samplesPerClient {
+		key_n := rand.Int63n(int64(keyspace_len))
+
+		if useRateLimiter {
+			r := rateLimiter.ReserveN(time.Now(), int(pipeline))
+			time.Sleep(r.Delay())
+		}
+		var j uint64 = 0
+		if multi {
+			cmds[0] = radix.Cmd(nil, "MULTI")
+			cmds[pipeline+multiPad] = radix.Cmd(&cmdReplies, "EXEC")
+		}
+		for j < pipeline {
+			keyname := getBenchKeyName(uint64(key_n))
+			cmdArgs := []string{keyname, "1", "0"}
+			cmds[j+multiPad] = radix.Cmd(&cmdReplies[j], "ZREVRANGEBYSCORE", cmdArgs...)
+			j = j + 1
+			key_n = key_n + crc16_num_slots
+			if uint64(key_n) > keyspace_len {
+				key_n = key_n % crc16_num_slots
+			}
+		}
+		var err error
+		startT := time.Now()
+		err = conn.Do(radix.Pipeline(cmds...))
+		endT := time.Now()
+		if err != nil {
+			log.Fatalf("Received an error with the following command(s): %v, error: %v", cmds, err)
+		}
+		duration := endT.Sub(startT)
+		err = latencies.RecordValue(duration.Microseconds())
+		if err != nil {
+			log.Fatalf("Received an error while recording latencies: %v", err)
+		}
+		for _, reply := range cmdReplies {
+			atomic.AddUint64(&replySizes[len(reply)/2], 1)
+		}
+		atomic.AddUint64(&totalCommands, uint64(pipeline))
+		i = i + pipeline
+	}
+}
+
 func loadGoRoutime(conn radix.Client, keyspace_client_start uint64, keyspace_client_end uint64, samplesPerClient uint64, pipeline uint64, perKeyElmDataSize uint64, perKeyElmRangeStart uint64, perKeyElmRangeEnd uint64, debug int, w *sync.WaitGroup, useRateLimiter bool, rateLimiter *rate.Limiter) {
 	defer w.Done()
 	var i uint64 = 0
@@ -227,6 +377,7 @@ func loadGoRoutime(conn radix.Client, keyspace_client_start uint64, keyspace_cli
 			for ; k < nElements; k++ {
 				cmdArgs = append(cmdArgs, fmt.Sprintf("%f", rand.Float32()), stringWithCharset(int(perKeyElmDataSize), charset))
 			}
+			atomic.AddUint64(&totalAddedElements, uint64(nElements))
 			cmds[j] = radix.Cmd(nil, "ZADD", cmdArgs...)
 			keypos++
 		}
