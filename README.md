@@ -7,31 +7,28 @@ Redis Sorted Sets Benchmark
 This repo contains code to trigger `load` ( `ZADD` ) or `query` (`ZRANGEBYLEX key min max`) benchmarks, 
 with/without transaction, with/without pipelining, and with diversified ways of controlling the per-key size and total keyspace length.
 
-## Install 
-### Standalone binaries ( no Golang needed )
+## Installation
+
+### Download Standalone binaries ( no Golang needed )
 
 If you don't have go on your machine and just want to use the produced binaries you can download the following prebuilt bins:
 
+https://github.com/redis-performance/redis-zbench-go/releases/latest
+
 | OS | Arch | Link |
 | :---         |     :---:      |          ---: |
-| Windows   | amd64     | [redis--go_windows_amd64.exe](https://s3.amazonaws.com/benchmarks.redislabs/tools/redis-zbench-go/unstable/redis-zbench-go_windows_amd64.exe)    |
-| Linux   | amd64     | [redis-zbench-go_linux_amd64](https://s3.amazonaws.com/benchmarks.redislabs/tools/redis-zbench-go/unstable/redis-zbench-go_linux_amd64)    |
-| Linux   | arm64     | [redis-zbench-go_linux_arm64](https://s3.amazonaws.com/benchmarks.redislabs/tools/redis-zbench-go/unstable/redis-zbench-go_linux_arm64)    |
-| Darwin   | amd64     | [redis-zbench-go_darwin_amd64](https://s3.amazonaws.com/benchmarks.redislabs/tools/redis-zbench-go/unstable/redis-zbench-go_darwin_amd64)    |
-| Darwin   | arm64     | [redis-zbench-go_darwin_arm64](https://s3.amazonaws.com/benchmarks.redislabs/tools/redis-zbench-go/unstable/redis-zbench-go_darwin_arm64)    |
+| Linux   | amd64  (64-bit X86)     | [redis-zbench-go-linux-amd64](https://github.com/redis-performance/redis-zbench-go/releases/latest/download/redis-zbench-go-linux-amd64.tar.gz)    |
+| Linux   | arm64 (64-bit ARM)     | [redis-zbench-go-linux-arm64](https://github.com/redis-performance/redis-zbench-go/releases/latest/download/redis-zbench-go-linux-arm64.tar.gz)    |
+| Darwin   | amd64  (64-bit X86)     | [redis-zbench-go-darwin-amd64](https://github.com/redis-performance/redis-zbench-go/releases/latest/download/redis-zbench-go-darwin-amd64.tar.gz)    |
+| Darwin   | arm64 (64-bit ARM)     | [redis-zbench-go-darwin-arm64](https://github.com/redis-performance/redis-zbench-go/releases/latest/download/redis-zbench-go-darwin-arm64.tar.gz)    |
 
+Here's how bash script to download and try it:
 
-
-Here's an example on how to use the above links:
 ```bash
-# Fetch this repo
-wget https://s3.amazonaws.com/benchmarks.redislabs/tools/redis-zbench-go/unstable/redis-zbench-go_linux_amd64
+wget -c https://github.com/redis-performance/redis-zbench-go/releases/latest/download/redis-zbench-go-$(uname -mrs | awk '{ print tolower($1) }')-$(dpkg --print-architecture).tar.gz -O - | tar -xz
 
-# change permissions
-chmod 755 redis-zbench-go_linux_amd64
-
-# give it a try 
-./redis-zbench-go_linux_amd64 --help
+# give it a try
+./redis-zbench-go --help
 ```
 
 ### Installation in a Golang env
@@ -40,8 +37,8 @@ The easiest way to get and install the benchmark utility with a Go Env is to use
 `go get` and then `go install`:
 ```bash
 # Fetch this repo
-go get github.com/filipecosta90/redis-zbench-go
-cd $GOPATH/src/github.com/filipecosta90/redis-zbench-go
+go get github.com/redis-performance/redis-zbench-go
+cd $GOPATH/src/github.com/redis-performance/redis-zbench-go
 make
 ```
 
