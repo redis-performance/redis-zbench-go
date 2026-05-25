@@ -4,17 +4,21 @@ Instructions for AI coding agents (Claude Code, Copilot, Cursor, etc.) working i
 
 ## Project overview
 
-<!-- TODO: one paragraph describing what this repo does -->
+`redis-zbench-go` is a Go benchmark tool for Redis **Sorted Sets**. It drives `ZADD` (load mode) and `ZRANGEBYLEX` / `ZRANGEBYSCORE` (query mode) workloads against a standalone or OSS-cluster Redis deployment, with configurable concurrency, pipelining, multi-exec transactions, keyspace size, element size, and RPS limits. The tool emits throughput and HDR-histogram latency summaries. It is published as a single self-contained binary for Linux and macOS (amd64 and arm64).
 
 ## Local setup
 
-<!-- TODO: mirror the setup steps from CONTRIBUTING.md -->
-
 ```bash
-# Example
-git clone git@github.com:redis-performance/<repo>.git
-cd <repo>
+git clone git@github.com:redis-performance/redis-zbench-go.git
+cd redis-zbench-go
+# Download all Go module dependencies
+GO111MODULE=on go get -t -v ./...
+# Build the binary
+make build
+# The compiled binary lands in the current directory as ./redis-zbench-go
 ```
+
+Requires **Go 1.16 or later**. A running Redis instance is needed for integration tests (default: `127.0.0.1:6379`).
 
 ## Branch naming
 
@@ -29,11 +33,16 @@ Same as human contributors: `<type>/<short-description>` (e.g. `fix/off-by-one-i
 
 ## Running tests
 
-<!-- TODO: exact command to run tests -->
+```bash
+make test
+```
+
+This formats all Go source files with `gofmt`, then runs `go test -race -covermode=atomic ./...`. A Redis instance must be reachable on `127.0.0.1:6379`.
+
+To also generate a coverage report:
 
 ```bash
-# Example
-make test
+make coverage
 ```
 
 Always run tests before declaring a task complete.
